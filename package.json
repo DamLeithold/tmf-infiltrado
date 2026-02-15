@@ -1,0 +1,18 @@
+{
+  "name": "tmf-infiltrado",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "start": "next start",
+    "dev": "next dev"
+  },
+  "dependencies": {
+    "firebase": "^10.12.2",
+    "nanoid": "^5.0.7",
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "qrcode.react": "^3.1.0"
+  }
+}
