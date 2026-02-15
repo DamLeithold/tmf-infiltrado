@@ -1,4 +1,3 @@
-export const dynamic = "force-dynamic";
 "use client";
 
 import { useRouter } from "next/navigation";
@@ -16,7 +15,7 @@ export default function HostPage() {
     await setDoc(doc(db, "games", code), {
       hostUid: user.uid,
       status: "lobby",
-      createdAt: serverTimestamp()
+      createdAt: serverTimestamp(),
     });
 
     router.push(`/g/${code}`);
@@ -34,12 +33,11 @@ export default function HostPage() {
           backgroundColor: "#16a34a",
           color: "white",
           border: "none",
-          borderRadius: 5
+          borderRadius: 5,
         }}
       >
         Crear nueva partida
       </button>
-
     </main>
   );
 }
