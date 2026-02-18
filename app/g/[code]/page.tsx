@@ -15,13 +15,42 @@ type GameDoc = {
   estado: "lobby" | "running" | "results";
   ronda: number;
   players: Player[];
-  roundEndsAt?: number;
+  roundEndsAt?: number | null;
   hostUid?: string;
   reveal?: boolean;
+  word?: string | null; // ✅ Paso 2.B
 };
 
 const EQUIPOS = ["A", "B", "C", "D"] as const;
 const ROUND_DURATION = 300; // segundos (5 min)
+
+// ✅ Lista simple de palabras (podés ampliar)
+const WORDS = [
+  "Mate",
+  "Asado",
+  "Factura",
+  "Excel",
+  "Auditoría",
+  "Café",
+  "Facturación",
+  "Balance",
+  "Impuestos",
+  "Sueldo",
+  "Oficina",
+  "Home office",
+  "Reunión",
+  "Cumpleaños",
+  "Equipo",
+  "Cliente",
+  "Recibo",
+  "Planilla",
+  "Firma",
+  "Turno",
+];
+
+function pickRandomWord() {
+  return WORDS[Math.floor(Math.random() * WORDS.length)];
+}
 
 export default function Lobby({ params }: { params: { code: string } }) {
   const code = params.code;
@@ -30,11 +59,10 @@ export default function Lobby({ params }: { params: { code: string } }) {
   const [showRole, setShowRole] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [myUid, setMyUid] = useState<string>("");
+  const [hostBusy, setHostBusy] = useState(false);
 
   const nombre =
-    typeof window !== "undefined"
-      ? localStorage.getItem("nombre") || ""
-      : "";
+    typeof window !== "undefined" ? localStorage.getItem("nombre") || "" : "";
 
   // Obtener UID anónimo (para detectar host)
   useEffect(() => {
@@ -82,58 +110,94 @@ export default function Lobby({ params }: { params: { code: string } }) {
 
   async function iniciarRonda() {
     if (!game) return;
+    if (hostBusy) return;
 
-    const nuevos = (game.players || []).map((p) => ({
-      ...p,
-      rol: "equipo" as const,
-    }));
+    setHostBusy(true);
+    try {
+      const nuevos: Player[] = (game.players || []).map((p) => ({
+        ...p,
+        rol: "equipo",
+      }));
 
-    // 1 infiltrado por equipo (si ese equipo tiene jugadores)
-    EQUIPOS.forEach((eq) => {
-      const jugadoresEquipo = nuevos.filter((p) => p.equipo === eq);
-      if (jugadoresEquipo.length > 0) {
-        const infiltrado =
-          jugadoresEquipo[
-            Math.floor(Math.random() * jugadoresEquipo.length)
-          ];
-        infiltrado.rol = "infiltrado";
-      }
-    });
+      // 1 infiltrado por equipo (si ese equipo tiene jugadores)
+      EQUIPOS.forEach((eq) => {
+        const jugadoresEquipo = nuevos.filter((p) => p.equipo === eq);
+        if (jugadoresEquipo.length > 0) {
+          const infiltrado =
+            jugadoresEquipo[Math.floor(Math.random() * jugadoresEquipo.length)];
+          infiltrado.rol = "infiltrado";
+        }
+      });
 
-    const roundEndsAt = Date.now() + ROUND_DURATION * 1000;
+      const roundEndsAt = Date.now() + ROUND_DURATION * 1000;
 
-    await updateDoc(doc(db, "games", code), {
-      players: nuevos,
-      estado: "running",
-      ronda: (game.ronda || 0) + 1,
-      roundEndsAt,
-      reveal: false,
-    });
+      // ✅ Paso 2.B: elegir palabra y guardarla en Firestore
+      const word = pickRandomWord();
 
-    setShowRole(false);
+      await updateDoc(doc(db, "games", code), {
+        players: nuevos,
+        estado: "running",
+        ronda: (game.ronda || 0) + 1,
+        roundEndsAt,
+        reveal: false,
+        word, // ✅ guardado
+      });
+
+      setShowRole(false);
+    } catch (e: any) {
+      alert(`Error al iniciar ronda: ${e?.message || e}`);
+    } finally {
+      setHostBusy(false);
+    }
   }
 
   async function finalizarRonda() {
-    await updateDoc(doc(db, "games", code), {
-      estado: "results",
-      roundEndsAt: null,
-    });
+    if (hostBusy) return;
+    setHostBusy(true);
+    try {
+      await updateDoc(doc(db, "games", code), {
+        estado: "results",
+        roundEndsAt: null,
+      });
+    } catch (e: any) {
+      alert(`Error al finalizar ronda: ${e?.message || e}`);
+    } finally {
+      setHostBusy(false);
+    }
   }
 
   async function volverAlLobby() {
-    await updateDoc(doc(db, "games", code), {
-      estado: "lobby",
-      roundEndsAt: null,
-      reveal: false,
-    });
+    if (hostBusy) return;
+    setHostBusy(true);
+    try {
+      await updateDoc(doc(db, "games", code), {
+        estado: "lobby",
+        roundEndsAt: null,
+        reveal: false,
+        // opcional: mantener word o limpiarla
+        // word: null,
+      });
+    } catch (e: any) {
+      alert(`Error al volver al lobby: ${e?.message || e}`);
+    } finally {
+      setHostBusy(false);
+    }
   }
 
   async function revelarInfiltrados() {
-    await updateDoc(doc(db, "games", code), {
-      reveal: true,
-      estado: "results",
-      roundEndsAt: null,
-    });
+    if (hostBusy) return;
+    setHostBusy(true);
+    try {
+      await updateDoc(doc(db, "games", code), {
+        reveal: true,
+        estado: "results",
+        roundEndsAt: null,
+      });
+    } catch (e: any) {
+      alert(`Error al revelar: ${e?.message || e}`);
+    } finally {
+      setHostBusy(false);
+    }
   }
 
   async function pantallaCompleta() {
@@ -142,8 +206,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
     else await document.exitFullscreen();
   }
 
-  if (!game)
-    return <div style={{ padding: 20 }}>Cargando...</div>;
+  if (!game) return <div style={{ padding: 20 }}>Cargando...</div>;
 
   const infiltradosPorEquipo = EQUIPOS.map((eq) => {
     const inf = (game.players || []).find(
@@ -155,7 +218,21 @@ export default function Lobby({ params }: { params: { code: string } }) {
   return (
     <div style={{ padding: 20, fontFamily: "Arial" }}>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-        <img src="/tmf-logo.png" style={{ height: 40, background: "white", padding: 4, borderRadius: 6 }} />
+        {/* ✅ Si tu archivo es public/TMF_Group.png */}
+        <img
+          src="/TMF_Group.png"
+          onError={(e) => {
+            // fallback por si tenés otro nombre
+            (e.currentTarget as HTMLImageElement).src = "/tmf-logo.png";
+          }}
+          style={{
+            height: 40,
+            background: "white",
+            padding: 4,
+            borderRadius: 6,
+          }}
+          alt="TMF"
+        />
         <div>
           <div style={{ fontSize: 20, fontWeight: 800 }}>El Infiltrado TMF</div>
           <div style={{ opacity: 0.8 }}>
@@ -203,6 +280,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
               onClick={iniciarRonda}
+              disabled={hostBusy}
               style={{
                 padding: "10px 14px",
                 background: "#e11d48",
@@ -210,13 +288,15 @@ export default function Lobby({ params }: { params: { code: string } }) {
                 border: "none",
                 borderRadius: 10,
                 fontWeight: 800,
+                opacity: hostBusy ? 0.6 : 1,
               }}
             >
-              Iniciar / Siguiente ronda
+              {hostBusy ? "Procesando..." : "Iniciar / Siguiente ronda"}
             </button>
 
             <button
               onClick={finalizarRonda}
+              disabled={hostBusy}
               style={{
                 padding: "10px 14px",
                 background: "#111827",
@@ -224,6 +304,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
                 border: "none",
                 borderRadius: 10,
                 fontWeight: 800,
+                opacity: hostBusy ? 0.6 : 1,
               }}
             >
               Finalizar ronda
@@ -231,6 +312,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
 
             <button
               onClick={revelarInfiltrados}
+              disabled={hostBusy}
               style={{
                 padding: "10px 14px",
                 background: "#16a34a",
@@ -238,6 +320,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
                 border: "none",
                 borderRadius: 10,
                 fontWeight: 800,
+                opacity: hostBusy ? 0.6 : 1,
               }}
             >
               Revelar infiltrados
@@ -245,6 +328,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
 
             <button
               onClick={volverAlLobby}
+              disabled={hostBusy}
               style={{
                 padding: "10px 14px",
                 background: "#2563eb",
@@ -252,6 +336,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
                 border: "none",
                 borderRadius: 10,
                 fontWeight: 800,
+                opacity: hostBusy ? 0.6 : 1,
               }}
             >
               Volver a lobby
@@ -259,13 +344,21 @@ export default function Lobby({ params }: { params: { code: string } }) {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-            * “Revelar infiltrados” fuerza modo resultados y muestra quién era el infiltrado por equipo.
+            * “Revelar infiltrados” fuerza modo resultados y muestra quién era el
+            infiltrado por equipo.
           </div>
         </div>
       )}
 
       {/* ROLE (PLAYER SECRET) */}
-      <div style={{ marginTop: 18, padding: 14, border: "1px solid #ddd", borderRadius: 12 }}>
+      <div
+        style={{
+          marginTop: 18,
+          padding: 14,
+          border: "1px solid #ddd",
+          borderRadius: 12,
+        }}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ fontWeight: 800 }}>Tu rol (pantalla secreta)</div>
           <button
@@ -296,6 +389,31 @@ export default function Lobby({ params }: { params: { code: string } }) {
                 <div style={{ fontSize: 14, opacity: 0.75, marginTop: 4 }}>
                   Equipo: <b>{miJugador.equipo}</b>
                 </div>
+
+                {/* ✅ Mostrar palabra SOLO a "equipo" */}
+                {miJugador.rol === "equipo" && game.word && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      padding: 12,
+                      borderRadius: 12,
+                      background: "#f3f4f6",
+                      color: "#111827",
+                      fontSize: 22,
+                      fontWeight: 900,
+                      display: "inline-block",
+                    }}
+                  >
+                    Palabra: <span style={{ textTransform: "uppercase" }}>{game.word}</span>
+                  </div>
+                )}
+
+                {/* ✅ Si es infiltrado, no mostrar palabra */}
+                {miJugador.rol === "infiltrado" && (
+                  <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
+                    No tenés palabra. Improvisá 😈
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -308,8 +426,17 @@ export default function Lobby({ params }: { params: { code: string } }) {
 
       {/* RESULTS */}
       {game.estado === "results" && game.reveal && (
-        <div style={{ marginTop: 18, padding: 14, border: "2px solid #111827", borderRadius: 12 }}>
-          <div style={{ fontWeight: 900, marginBottom: 8 }}>📣 Infiltrados por equipo</div>
+        <div
+          style={{
+            marginTop: 18,
+            padding: 14,
+            border: "2px solid #111827",
+            borderRadius: 12,
+          }}
+        >
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>
+            📣 Infiltrados por equipo
+          </div>
           <ul style={{ margin: 0, paddingLeft: 18 }}>
             {infiltradosPorEquipo.map(({ eq, infNombre }) => (
               <li key={eq}>
@@ -320,11 +447,19 @@ export default function Lobby({ params }: { params: { code: string } }) {
         </div>
       )}
 
-      {/* PLAYERS */}
-      <div style={{ marginTop: 18, padding: 14, border: "1px solid #ddd", borderRadius: 12 }}>
+      {/* PLAYERS (✅ ocultar roles SIEMPRE acá) */}
+      <div
+        style={{
+          marginTop: 18,
+          padding: 14,
+          border: "1px solid #ddd",
+          borderRadius: 12,
+        }}
+      >
         <div style={{ fontWeight: 900, marginBottom: 8 }}>
           Jugadores ({game.players?.length || 0})
         </div>
+
         {(game.players || []).map((p) => (
           <div key={p.nombre}>
             {p.nombre} — Equipo <b>{p.equipo}</b>
