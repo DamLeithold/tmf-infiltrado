@@ -1,53 +1,43 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import {
-  doc,
-  onSnapshot,
-  updateDoc,
-  arrayUnion,
-} from "firebase/firestore";
+import { doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { db, ensureAnonAuth } from "@/lib/firebase";
 
-type Equipo = "A" | "B" | "C" | "D";
+type Team = "A" | "B" | "C" | "D";
 
 type Player = {
   nombre: string;
-  equipo: Equipo;
+  equipo: Team;
   rol?: "equipo" | "infiltrado";
 };
 
-type VoteEntry = {
-  ronda: number;
-  equipo: Equipo;
-  voter: string;
-  target: string;
-  ts: number;
-};
-
-type Scores = Record<Equipo, number>;
+type Scores = Record<Team, number>;
+type Votes = Record<Team, Record<string, string>>; // votes[team][voterName] = suspectName
 
 type GameDoc = {
-  code: string;
-  estado: "lobby" | "running" | "results";
-  ronda: number;
-  players: Player[];
+  code?: string;
+
+  // compat: algunos docs viejos usan status
+  estado?: "lobby" | "running" | "results";
+  status?: "lobby" | "running" | "results";
+
+  ronda?: number;
+  players?: Player[];
 
   roundEndsAt?: number | null;
-  roundStartedAt?: number | null;
-
   hostUid?: string;
   reveal?: boolean;
+
   word?: string | null;
 
-  votes?: VoteEntry[];
+  // NUEVO
   scores?: Scores;
+  votes?: Votes;
 };
 
-const EQUIPOS: readonly Equipo[] = ["A", "B", "C", "D"] as const;
-const ROUND_DURATION = 300; // 5 min
-
-const DEFAULT_SCORES: Scores = { A: 0, B: 0, C: 0, D: 0 };
+const EQUIPOS: Team[] = ["A", "B", "C", "D"];
+const ROUND_DURATION_DEFAULT = 300; // 5 min (si querés hacerlo editable, lo hacemos)
 
 const WORDS = [
   "Mate",
@@ -76,30 +66,30 @@ function pickRandomWord() {
   return WORDS[Math.floor(Math.random() * WORDS.length)];
 }
 
-function safeEstado(raw: any): GameDoc["estado"] {
-  // compat: algunos docs viejos usan "status"
-  return (raw?.estado || raw?.status || "lobby") as GameDoc["estado"];
+function emptyScores(): Scores {
+  return { A: 0, B: 0, C: 0, D: 0 };
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+function emptyVotes(): Votes {
+  return { A: {}, B: {}, C: {}, D: {} };
+}
+
+function safeEstado(g: GameDoc | null): "lobby" | "running" | "results" {
+  const e = g?.estado ?? g?.status ?? "lobby";
+  return e;
 }
 
 export default function Lobby({ params }: { params: { code: string } }) {
   const code = params.code;
 
   const [game, setGame] = useState<GameDoc | null>(null);
-  const [notFound, setNotFound] = useState(false);
-
   const [showRole, setShowRole] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [myUid, setMyUid] = useState<string>("");
   const [hostBusy, setHostBusy] = useState(false);
 
+  // para construir URL del QR sin SSR issues
   const [origin, setOrigin] = useState<string>("");
-
-  // UI de voto
-  const [voteTarget, setVoteTarget] = useState<string>("");
 
   const nombre =
     typeof window !== "undefined" ? localStorage.getItem("nombre") || "" : "";
@@ -108,7 +98,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
     if (typeof window !== "undefined") setOrigin(window.location.origin);
   }, []);
 
-  // auth anónimo
+  // auth anon
   useEffect(() => {
     (async () => {
       const u = await ensureAnonAuth();
@@ -116,35 +106,12 @@ export default function Lobby({ params }: { params: { code: string } }) {
     })();
   }, []);
 
-  // escuchar doc
+  // escuchar game doc
   useEffect(() => {
     const ref = doc(db, "games", code);
     return onSnapshot(ref, (snap) => {
-      if (!snap.exists()) {
-        setNotFound(true);
-        setGame(null);
-        return;
-      }
-      setNotFound(false);
-
-      const raw: any = snap.data();
-
-      const normalized: GameDoc = {
-        code: raw.code || code,
-        estado: safeEstado(raw),
-        ronda: typeof raw.ronda === "number" ? raw.ronda : 0,
-        players: Array.isArray(raw.players) ? raw.players : [],
-        roundEndsAt: typeof raw.roundEndsAt === "number" ? raw.roundEndsAt : null,
-        roundStartedAt:
-          typeof raw.roundStartedAt === "number" ? raw.roundStartedAt : null,
-        hostUid: raw.hostUid,
-        reveal: !!raw.reveal,
-        word: typeof raw.word === "string" ? raw.word : null,
-        votes: Array.isArray(raw.votes) ? raw.votes : [],
-        scores: raw.scores && typeof raw.scores === "object" ? raw.scores : DEFAULT_SCORES,
-      };
-
-      setGame(normalized);
+      const data = snap.data() as GameDoc | undefined;
+      setGame(data ?? null);
     });
   }, [code]);
 
@@ -154,19 +121,39 @@ export default function Lobby({ params }: { params: { code: string } }) {
     return () => clearInterval(interval);
   }, []);
 
+  const estado = useMemo(() => safeEstado(game), [game]);
+
+  const players: Player[] = useMemo(() => {
+    return (game?.players ?? []) as Player[];
+  }, [game?.players]);
+
+  const scores: Scores = useMemo(() => {
+    return (game?.scores ?? emptyScores()) as Scores;
+  }, [game?.scores]);
+
+  const votes: Votes = useMemo(() => {
+    return (game?.votes ?? emptyVotes()) as Votes;
+  }, [game?.votes]);
+
   const isHost = useMemo(() => {
     if (!game?.hostUid) return false;
-    return myUid && myUid === game.hostUid;
+    return myUid === game.hostUid;
   }, [myUid, game?.hostUid]);
 
   const miJugador = useMemo(() => {
-    if (!game) return null;
-    return game.players?.find((p) => p.nombre === nombre) || null;
-  }, [game, nombre]);
+    if (!nombre) return null;
+    return players.find((p) => p.nombre === nombre) || null;
+  }, [players, nombre]);
+
+  const joinUrl = useMemo(() => {
+    const path = `/g/${code}`;
+    return origin ? `${origin}${path}` : path;
+  }, [origin, code]);
 
   const tiempoRestante = useMemo(() => {
-    if (!game?.roundEndsAt) return 0;
-    const ms = (game.roundEndsAt as number) - now;
+    const ends = game?.roundEndsAt;
+    if (!ends) return 0;
+    const ms = ends - now;
     return Math.max(0, Math.floor(ms / 1000));
   }, [game?.roundEndsAt, now]);
 
@@ -175,10 +162,26 @@ export default function Lobby({ params }: { params: { code: string } }) {
     .padStart(2, "0");
   const segundos = (tiempoRestante % 60).toString().padStart(2, "0");
 
-  const joinUrl = useMemo(() => {
-    const path = `/g/${code}`;
-    return origin ? `${origin}${path}` : path;
-  }, [origin, code]);
+  const playersByTeam = useMemo(() => {
+    const map: Record<Team, Player[]> = { A: [], B: [], C: [], D: [] };
+    for (const p of players) map[p.equipo].push(p);
+    return map;
+  }, [players]);
+
+  const teamSizes = useMemo(() => {
+    return EQUIPOS.reduce((acc, t) => {
+      acc[t] = playersByTeam[t].length;
+      return acc;
+    }, {} as Record<Team, number>);
+  }, [playersByTeam]);
+
+  // QR sin librería (evita el error de hooks)
+  const qrImgUrl = useMemo(() => {
+    // servicio simple de QR (solo imagen)
+    return `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(
+      joinUrl
+    )}`;
+  }, [joinUrl]);
 
   async function copyLink() {
     try {
@@ -189,45 +192,92 @@ export default function Lobby({ params }: { params: { code: string } }) {
     }
   }
 
-  // ---- RONDA ----
+  // ============ SISTEMA DE PUNTOS (competitivo) ============
+  // Por equipo (solo si el equipo tiene 2+ jugadores; si tiene 1, no puntúa esa ronda)
+  //
+  // - Si el equipo atrapa a su infiltrado (mayoría de votos): +3
+  // - Bonus por unanimidad (todos votaron lo mismo y era el infiltrado): +1 extra
+  // - Si NO lo atrapa: 0 (y además se suma +1 a TODOS LOS OTROS equipos activos) => genera diferencia y evita empates permanentes
+  //
+  // Nota: "equipos activos" = equipos con 2+ jugadores
+  //
+  function computeRoundScoring(currentScores: Scores, caughtByTeam: Record<Team, boolean>, unanimousCaught: Record<Team, boolean>) {
+    const activeTeams = EQUIPOS.filter((t) => teamSizes[t] >= 2);
+    const next = { ...currentScores };
+
+    for (const t of activeTeams) {
+      if (caughtByTeam[t]) {
+        next[t] += 3;
+        if (unanimousCaught[t]) next[t] += 1;
+      } else {
+        // el equipo falló => no suma
+        // y los otros equipos activos suman +1
+        for (const other of activeTeams) {
+          if (other !== t) next[other] += 1;
+        }
+      }
+    }
+    return next;
+  }
+
+  function majoritySuspect(team: Team): { suspect: string | null; isUnanimous: boolean; votedCount: number } {
+    const v = votes?.[team] ?? {};
+    const arr = Object.values(v).filter(Boolean);
+    if (arr.length === 0) return { suspect: null, isUnanimous: false, votedCount: 0 };
+
+    const count: Record<string, number> = {};
+    for (const s of arr) count[s] = (count[s] ?? 0) + 1;
+
+    let top: string | null = null;
+    let topN = -1;
+    for (const [k, n] of Object.entries(count)) {
+      if (n > topN) {
+        top = k;
+        topN = n;
+      }
+    }
+
+    // unanimidad real: todos los votos iguales (y además idealmente todos votaron)
+    const isUnanimous = Object.keys(count).length === 1;
+    return { suspect: top, isUnanimous, votedCount: arr.length };
+  }
+
+  // ============ ACCIONES HOST ============
   async function iniciarRonda() {
     if (!game) return;
     if (hostBusy) return;
 
     setHostBusy(true);
     try {
-      const nuevos: Player[] = (game.players || []).map((p) => ({
-        ...p,
-        rol: "equipo",
-      }));
+      const nuevos: Player[] = players.map((p) => ({ ...p, rol: "equipo" }));
 
       // 1 infiltrado por equipo (si ese equipo tiene jugadores)
-      EQUIPOS.forEach((eq) => {
+      for (const eq of EQUIPOS) {
         const jugadoresEquipo = nuevos.filter((p) => p.equipo === eq);
         if (jugadoresEquipo.length > 0) {
           const infiltrado =
             jugadoresEquipo[Math.floor(Math.random() * jugadoresEquipo.length)];
           infiltrado.rol = "infiltrado";
         }
-      });
+      }
 
-      const startedAt = Date.now();
-      const roundEndsAt = startedAt + ROUND_DURATION * 1000;
+      const roundEndsAt = Date.now() + ROUND_DURATION_DEFAULT * 1000;
       const word = pickRandomWord();
 
       await updateDoc(doc(db, "games", code), {
         players: nuevos,
+        // compat: guardo ambos
         estado: "running",
-        ronda: (game.ronda || 0) + 1,
-        roundStartedAt: startedAt,
+        status: "running",
+        ronda: (game.ronda ?? 0) + 1,
         roundEndsAt,
         reveal: false,
         word,
-        votes: [], // limpiamos votos para la nueva ronda
+        votes: emptyVotes(), // reset votos cada ronda
+        scores: game.scores ?? emptyScores(), // asegura scores
       });
 
       setShowRole(false);
-      setVoteTarget("");
     } catch (e: any) {
       alert(`Error al iniciar ronda: ${e?.message || e}`);
     } finally {
@@ -235,16 +285,47 @@ export default function Lobby({ params }: { params: { code: string } }) {
     }
   }
 
-  async function finalizarRonda() {
+  async function finalizarYpuntuarYrevelar() {
+    if (!game) return;
     if (hostBusy) return;
+
     setHostBusy(true);
     try {
+      // identificar infiltrado por equipo
+      const infiltradoPorEquipo: Record<Team, string | null> = { A: null, B: null, C: null, D: null };
+      for (const t of EQUIPOS) {
+        const inf = playersByTeam[t].find((p) => p.rol === "infiltrado");
+        infiltradoPorEquipo[t] = inf?.nombre ?? null;
+      }
+
+      // determinar si lo atraparon (por mayoría de votos)
+      const caughtByTeam: Record<Team, boolean> = { A: false, B: false, C: false, D: false };
+      const unanimousCaught: Record<Team, boolean> = { A: false, B: false, C: false, D: false };
+
+      for (const t of EQUIPOS) {
+        const infName = infiltradoPorEquipo[t];
+        if (!infName) continue;
+
+        const { suspect, isUnanimous } = majoritySuspect(t);
+        const caught = !!suspect && suspect === infName;
+
+        caughtByTeam[t] = caught;
+
+        // bonus unanimidad SOLO si fue atrapado y además unanimidad
+        unanimousCaught[t] = caught && isUnanimous;
+      }
+
+      const nextScores = computeRoundScoring(scores, caughtByTeam, unanimousCaught);
+
       await updateDoc(doc(db, "games", code), {
+        scores: nextScores,
+        reveal: true,
         estado: "results",
+        status: "results",
         roundEndsAt: null,
       });
     } catch (e: any) {
-      alert(`Error al finalizar ronda: ${e?.message || e}`);
+      alert(`Error al finalizar/puntuar: ${e?.message || e}`);
     } finally {
       setHostBusy(false);
     }
@@ -256,159 +337,16 @@ export default function Lobby({ params }: { params: { code: string } }) {
     try {
       await updateDoc(doc(db, "games", code), {
         estado: "lobby",
+        status: "lobby",
         roundEndsAt: null,
-        roundStartedAt: null,
         reveal: false,
+        votes: emptyVotes(),
+        // word: null, // si querés limpiar palabra al volver al lobby
       });
     } catch (e: any) {
       alert(`Error al volver al lobby: ${e?.message || e}`);
     } finally {
       setHostBusy(false);
-    }
-  }
-
-  async function revelarInfiltrados() {
-    if (hostBusy) return;
-    setHostBusy(true);
-    try {
-      await updateDoc(doc(db, "games", code), {
-        reveal: true,
-        estado: "results",
-        roundEndsAt: null,
-      });
-    } catch (e: any) {
-      alert(`Error al revelar: ${e?.message || e}`);
-    } finally {
-      setHostBusy(false);
-    }
-  }
-
-  // ✅ FINALIZAR + REVELAR + PUNTUAR (competitivo)
-  async function finalizarRevelarYPuntuar() {
-    if (!game) return;
-    if (hostBusy) return;
-
-    setHostBusy(true);
-    try {
-      const rondaActual = game.ronda || 0;
-      const votes = Array.isArray(game.votes) ? game.votes : [];
-      const scores: Scores = { ...DEFAULT_SCORES, ...(game.scores || {}) };
-
-      const startedAt = game.roundStartedAt || (Date.now() - ROUND_DURATION * 1000);
-      const durationMs = ROUND_DURATION * 1000;
-
-      // helper: mayoría por equipo
-      const getMajority = (teamVotes: VoteEntry[]) => {
-        const tally = new Map<string, number>();
-        for (const v of teamVotes) tally.set(v.target, (tally.get(v.target) || 0) + 1);
-
-        const sorted = Array.from(tally.entries()).sort((a, b) => b[1] - a[1]);
-        if (sorted.length === 0) return { target: "", tie: false, count: 0 };
-
-        // empate?
-        if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
-          return { target: sorted[0][0], tie: true, count: sorted[0][1] };
-        }
-        return { target: sorted[0][0], tie: false, count: sorted[0][1] };
-      };
-
-      // infiltrado real por equipo
-      const infiltradoRealPorEquipo: Record<Equipo, string> = {
-        A: "",
-        B: "",
-        C: "",
-        D: "",
-      };
-      for (const eq of EQUIPOS) {
-        const inf = (game.players || []).find(
-          (p) => p.equipo === eq && p.rol === "infiltrado"
-        );
-        infiltradoRealPorEquipo[eq] = inf?.nombre || "";
-      }
-
-      // calcular delta puntos por equipo
-      const deltas: Scores = { A: 0, B: 0, C: 0, D: 0 };
-
-      for (const eq of EQUIPOS) {
-        const teamVotes = votes.filter((v) => v.ronda === rondaActual && v.equipo === eq);
-
-        if (teamVotes.length === 0) {
-          // no votaron
-          deltas[eq] = -2;
-          continue;
-        }
-
-        const { target, tie } = getMajority(teamVotes);
-
-        if (tie) {
-          // empate de votos
-          deltas[eq] = 0;
-          continue;
-        }
-
-        const infiltrado = infiltradoRealPorEquipo[eq];
-        const acertaron = infiltrado && target === infiltrado;
-
-        if (acertaron) {
-          // base
-          let pts = 3;
-
-          // bonus rapidez: tomamos el primer voto del equipo (cualquiera) como referencia
-          const firstVoteTs = teamVotes.reduce((min, v) => Math.min(min, v.ts), teamVotes[0].ts);
-          const progress = clamp((firstVoteTs - startedAt) / durationMs, 0, 1);
-
-          // <=50% del tiempo: +2, 50-80%: +1, >80%: +0
-          if (progress <= 0.5) pts += 2;
-          else if (progress <= 0.8) pts += 1;
-
-          deltas[eq] = pts;
-        } else {
-          deltas[eq] = -1;
-        }
-      }
-
-      // aplicar puntos
-      const newScores: Scores = { ...scores };
-      for (const eq of EQUIPOS) newScores[eq] = (newScores[eq] || 0) + deltas[eq];
-
-      await updateDoc(doc(db, "games", code), {
-        reveal: true,
-        estado: "results",
-        roundEndsAt: null,
-        scores: newScores,
-        lastDeltas: deltas, // opcional (por si querés mostrar “qué sumó cada uno”)
-      });
-    } catch (e: any) {
-      alert(`Error al puntuar: ${e?.message || e}`);
-    } finally {
-      setHostBusy(false);
-    }
-  }
-
-  // ---- VOTO jugador ----
-  async function enviarVoto() {
-    if (!game || !miJugador) return;
-    if (!voteTarget) return alert("Elegí a quién votás primero.");
-
-    if (game.estado !== "running") {
-      return alert("La ronda no está en curso.");
-    }
-
-    const entry: VoteEntry = {
-      ronda: game.ronda || 0,
-      equipo: miJugador.equipo,
-      voter: miJugador.nombre,
-      target: voteTarget,
-      ts: Date.now(),
-    };
-
-    try {
-      await updateDoc(doc(db, "games", code), {
-        votes: arrayUnion(entry),
-      });
-      alert("Voto enviado ✅");
-    } catch (e: any) {
-      alert(`Error enviando voto: ${e?.message || e}`);
     }
   }
 
@@ -418,46 +356,56 @@ export default function Lobby({ params }: { params: { code: string } }) {
     else await document.exitFullscreen();
   }
 
-  if (notFound) {
-    return (
-      <div style={{ padding: 20, fontFamily: "Arial" }}>
-        <h2>Partida no encontrada</h2>
-        <div style={{ opacity: 0.8 }}>
-          El código <b>{code}</b> no existe (o fue borrado).
-        </div>
-      </div>
-    );
+  // ============ VOTO (jugador) ============
+  const [suspect, setSuspect] = useState<string>("");
+
+  useEffect(() => {
+    // cuando cambia la ronda/estado, limpiamos selección local
+    setSuspect("");
+  }, [game?.ronda, estado]);
+
+  const myTeam = miJugador?.equipo ?? null;
+  const alreadyVoted = useMemo(() => {
+    if (!myTeam || !nombre) return false;
+    return !!votes?.[myTeam]?.[nombre];
+  }, [votes, myTeam, nombre]);
+
+  async function enviarVoto() {
+    if (!game || !myTeam || !nombre) return;
+    if (!suspect) return alert("Elegí a quién votás primero.");
+    try {
+      const nextVotes: Votes = {
+        ...votes,
+        [myTeam]: {
+          ...(votes?.[myTeam] ?? {}),
+          [nombre]: suspect,
+        },
+      };
+      await updateDoc(doc(db, "games", code), {
+        votes: nextVotes,
+      });
+      alert("Voto enviado ✅");
+    } catch (e: any) {
+      alert(`Error al votar: ${e?.message || e}`);
+    }
   }
 
+  // ============ UI helpers ============
+  const infiltradosPorEquipo = useMemo(() => {
+    return EQUIPOS.map((eq) => {
+      const inf = playersByTeam[eq].find((p) => p.rol === "infiltrado");
+      return { eq, infNombre: inf?.nombre || "—" };
+    });
+  }, [playersByTeam]);
+
+  const rankingOrdenado = useMemo(() => {
+    const arr = EQUIPOS.map((t) => ({ team: t, pts: scores[t] ?? 0, size: teamSizes[t] ?? 0 }));
+    // solo para mostrar: primero puntos, después tamaño
+    arr.sort((a, b) => (b.pts - a.pts) || (b.size - a.size) || (a.team.localeCompare(b.team)));
+    return arr;
+  }, [scores, teamSizes]);
+
   if (!game) return <div style={{ padding: 20 }}>Cargando...</div>;
-
-  const infiltradosPorEquipo = EQUIPOS.map((eq) => {
-    const inf = (game.players || []).find(
-      (p) => p.equipo === eq && p.rol === "infiltrado"
-    );
-    return { eq, infNombre: inf?.nombre || "—" };
-  });
-
-  // ranking por puntaje
-  const scores: Scores = { ...DEFAULT_SCORES, ...(game.scores || {}) };
-  const ranking = [...EQUIPOS]
-    .map((eq) => ({ eq, pts: scores[eq] || 0 }))
-    .sort((a, b) => b.pts - a.pts);
-
-  // para votar: lista de jugadores de mi equipo (menos yo)
-  const candidatosVoto = useMemo(() => {
-    if (!game || !miJugador) return [];
-    return (game.players || [])
-      .filter((p) => p.equipo === miJugador.equipo)
-      .map((p) => p.nombre);
-  }, [game, miJugador]);
-
-  const qrImgUrl = useMemo(() => {
-    // QR por imagen (evita qrcode.react y elimina el crash)
-    return `https://api.qrserver.com/v1/create-qr-code/?size=170x170&data=${encodeURIComponent(
-      joinUrl
-    )}`;
-  }, [joinUrl]);
 
   return (
     <div style={{ padding: 20, fontFamily: "Arial" }}>
@@ -482,8 +430,8 @@ export default function Lobby({ params }: { params: { code: string } }) {
         <div>
           <div style={{ fontSize: 20, fontWeight: 900 }}>El Infiltrado TMF</div>
           <div style={{ opacity: 0.85 }}>
-            Código: <b>{code}</b> · Estado: <b>{game.estado}</b> · Ronda:{" "}
-            <b>{game.ronda || 0}</b>
+            Código: <b>{code}</b> · Estado: <b>{estado}</b> · Ronda:{" "}
+            <b>{game.ronda ?? 0}</b>
           </div>
         </div>
         <div style={{ marginLeft: "auto" }}>
@@ -498,38 +446,36 @@ export default function Lobby({ params }: { params: { code: string } }) {
         style={{
           marginTop: 14,
           padding: 14,
-          border: "1px solid #e5e7eb",
           borderRadius: 14,
+          border: "1px solid #e5e7eb",
           background: "#fff",
         }}
       >
-        <div style={{ fontWeight: 900, marginBottom: 10 }}>🏆 Ranking por equipos</div>
+        <div style={{ fontWeight: 900, marginBottom: 8 }}>🏆 Ranking por equipos</div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          {ranking.map((r, idx) => (
+          {rankingOrdenado.map((r) => (
             <div
-              key={r.eq}
+              key={r.team}
               style={{
-                padding: "10px 12px",
+                minWidth: 140,
+                padding: 12,
                 borderRadius: 12,
                 border: "1px solid #e5e7eb",
-                minWidth: 120,
-                background: idx === 0 ? "#ecfeff" : "#f9fafb",
+                background: "#f9fafb",
               }}
             >
-              <div style={{ fontWeight: 900 }}>Equipo {r.eq}</div>
-              <div style={{ fontSize: 22, fontWeight: 900 }}>{r.pts}</div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>
-                {idx === 0 ? "Líder" : `Puesto #${idx + 1}`}
-              </div>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>Equipo {r.team}</div>
+              <div style={{ fontSize: 28, fontWeight: 900 }}>{r.pts}</div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>{r.size} jugador(es)</div>
             </div>
           ))}
         </div>
-        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-          Sistema competitivo: acierto +3 (+bonus rapidez), fallo -1, sin voto -2, empate 0.
+        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+          Regla: puntúan solo equipos con <b>2+</b> jugadores. Si un equipo falla, los demás equipos activos ganan +1.
         </div>
       </div>
 
-      {/* ✅ QR */}
+      {/* QR */}
       <div
         style={{
           marginTop: 14,
@@ -550,7 +496,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
               background: "#fff",
             }}
           >
-            <img src={qrImgUrl} width={170} height={170} alt="QR" />
+            <img src={qrImgUrl} width={180} height={180} alt="QR" />
           </div>
 
           <div style={{ minWidth: 240 }}>
@@ -602,7 +548,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
       </div>
 
       {/* TIMER */}
-      {game.estado === "running" && (
+      {estado === "running" && (
         <div
           style={{
             marginTop: 16,
@@ -649,7 +595,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
             </button>
 
             <button
-              onClick={finalizarRonda}
+              onClick={finalizarYpuntuarYrevelar}
               disabled={hostBusy}
               style={{
                 padding: "10px 14px",
@@ -661,39 +607,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
                 opacity: hostBusy ? 0.6 : 1,
               }}
             >
-              Finalizar ronda
-            </button>
-
-            <button
-              onClick={finalizarRevelarYPuntuar}
-              disabled={hostBusy}
-              style={{
-                padding: "10px 14px",
-                background: "#0f172a",
-                color: "white",
-                border: "none",
-                borderRadius: 10,
-                fontWeight: 900,
-                opacity: hostBusy ? 0.6 : 1,
-              }}
-            >
-              Finalizar + Revelar + Puntuar
-            </button>
-
-            <button
-              onClick={revelarInfiltrados}
-              disabled={hostBusy}
-              style={{
-                padding: "10px 14px",
-                background: "#16a34a",
-                color: "white",
-                border: "none",
-                borderRadius: 10,
-                fontWeight: 800,
-                opacity: hostBusy ? 0.6 : 1,
-              }}
-            >
-              Revelar infiltrados
+              Finalizar + Puntuar + Revelar
             </button>
 
             <button
@@ -714,7 +628,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-            * “Finalizar + Revelar + Puntuar” calcula mayoría por equipo y actualiza el ranking.
+            Puntaje: +3 si atrapan infiltrado (mayoría), +1 extra si es unanimidad. Si un equipo falla, los demás equipos activos ganan +1.
           </div>
         </div>
       )}
@@ -759,7 +673,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
                   Equipo: <b>{miJugador.equipo}</b>
                 </div>
 
-                {/* palabra SOLO a equipo */}
+                {/* Mostrar palabra SOLO a equipo */}
                 {miJugador.rol === "equipo" && game.word && (
                   <div
                     style={{
@@ -778,6 +692,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
                   </div>
                 )}
 
+                {/* Si es infiltrado, no mostrar palabra */}
                 {miJugador.rol === "infiltrado" && (
                   <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
                     No tenés palabra. Improvisá 😈
@@ -794,64 +709,70 @@ export default function Lobby({ params }: { params: { code: string } }) {
       </div>
 
       {/* VOTACIÓN */}
-      {miJugador && (
+      {estado === "running" && miJugador && (
         <div
           style={{
             marginTop: 18,
             padding: 14,
-            border: "1px solid #ddd",
+            border: "1px solid #e5e7eb",
             borderRadius: 12,
+            background: "#fff",
           }}
         >
           <div style={{ fontWeight: 900, marginBottom: 8 }}>📦 Votación (por equipo)</div>
-          <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 10 }}>
+          <div style={{ marginBottom: 8, opacity: 0.8 }}>
             Tu equipo: <b>{miJugador.equipo}</b>
           </div>
 
-          <select
-            value={voteTarget}
-            onChange={(e) => setVoteTarget(e.target.value)}
-            style={{
-              padding: 10,
-              width: "min(480px, 100%)",
-              borderRadius: 10,
-              border: "1px solid #d1d5db",
-            }}
-            disabled={game.estado !== "running"}
-          >
-            <option value="">Elegí a quién votás...</option>
-            {candidatosVoto.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
+          {teamSizes[miJugador.equipo] < 2 ? (
+            <div style={{ fontSize: 13, opacity: 0.8 }}>
+              Tu equipo tiene menos de 2 jugadores, esta ronda no puntúa.
+            </div>
+          ) : (
+            <>
+              <select
+                value={suspect}
+                onChange={(e) => setSuspect(e.target.value)}
+                style={{ width: "100%", padding: 10, borderRadius: 10 }}
+                disabled={alreadyVoted}
+              >
+                <option value="">Elegí a quién votás...</option>
+                {playersByTeam[miJugador.equipo]
+                  .filter((p) => p.nombre !== nombre)
+                  .map((p) => (
+                    <option key={p.nombre} value={p.nombre}>
+                      {p.nombre}
+                    </option>
+                  ))}
+              </select>
 
-          <div style={{ marginTop: 10 }}>
-            <button
-              onClick={enviarVoto}
-              disabled={game.estado !== "running"}
-              style={{
-                padding: "10px 14px",
-                background: game.estado === "running" ? "#16a34a" : "#9ca3af",
-                color: "white",
-                border: "none",
-                borderRadius: 10,
-                fontWeight: 900,
-              }}
-            >
-              Enviar voto
-            </button>
-          </div>
+              <button
+                onClick={enviarVoto}
+                disabled={alreadyVoted}
+                style={{
+                  marginTop: 10,
+                  padding: 12,
+                  width: "100%",
+                  border: "none",
+                  borderRadius: 10,
+                  fontWeight: 900,
+                  background: alreadyVoted ? "#9ca3af" : "#16a34a",
+                  color: "white",
+                }}
+              >
+                {alreadyVoted ? "Voto enviado ✅" : "Enviar voto"}
+              </button>
 
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-            Tip: si tu equipo se demora en votar, puede perder bonus de rapidez.
-          </div>
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+                Importante: votás solo a gente de tu equipo.
+              </div>
+            </>
+          )}
         </div>
       )}
 
       {/* RESULTS */}
-      {game.estado === "results" && game.reveal && (
+      {estado === "results" && game.reveal && (
         <div
           style={{
             marginTop: 18,
@@ -883,14 +804,23 @@ export default function Lobby({ params }: { params: { code: string } }) {
         }}
       >
         <div style={{ fontWeight: 900, marginBottom: 8 }}>
-          Jugadores ({game.players?.length || 0})
+          Jugadores ({players.length})
         </div>
 
-        {(game.players || []).map((p) => (
-          <div key={p.nombre}>
-            {p.nombre} — Equipo <b>{p.equipo}</b>
-          </div>
-        ))}
+        {players.length === 0 ? (
+          <div style={{ opacity: 0.7 }}>Todavía no hay jugadores.</div>
+        ) : (
+          EQUIPOS.map((t) => (
+            <div key={t} style={{ marginTop: 10 }}>
+              <div style={{ fontWeight: 900 }}>Equipo {t} ({playersByTeam[t].length})</div>
+              <div style={{ paddingLeft: 12, opacity: 0.9 }}>
+                {playersByTeam[t].map((p) => (
+                  <div key={p.nombre}>• {p.nombre}</div>
+                ))}
+              </div>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
