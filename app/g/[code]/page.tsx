@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { db, ensureAnonAuth } from "@/lib/firebase";
+import QRCode from "qrcode.react";
 
 type Player = {
   nombre: string;
@@ -18,13 +19,12 @@ type GameDoc = {
   roundEndsAt?: number | null;
   hostUid?: string;
   reveal?: boolean;
-  word?: string | null; // ✅ Paso 2.B
+  word?: string | null;
 };
 
 const EQUIPOS = ["A", "B", "C", "D"] as const;
-const ROUND_DURATION = 300; // segundos (5 min)
+const ROUND_DURATION = 300; // 5 min
 
-// ✅ Lista simple de palabras (podés ampliar)
 const WORDS = [
   "Mate",
   "Asado",
@@ -61,8 +61,15 @@ export default function Lobby({ params }: { params: { code: string } }) {
   const [myUid, setMyUid] = useState<string>("");
   const [hostBusy, setHostBusy] = useState(false);
 
+  // para construir URL del QR sin romper SSR
+  const [origin, setOrigin] = useState<string>("");
+
   const nombre =
     typeof window !== "undefined" ? localStorage.getItem("nombre") || "" : "";
+
+  useEffect(() => {
+    if (typeof window !== "undefined") setOrigin(window.location.origin);
+  }, []);
 
   // Obtener UID anónimo (para detectar host)
   useEffect(() => {
@@ -99,7 +106,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
 
   const tiempoRestante = useMemo(() => {
     if (!game?.roundEndsAt) return 0;
-    const ms = game.roundEndsAt - now;
+    const ms = (game.roundEndsAt as number) - now;
     return Math.max(0, Math.floor(ms / 1000));
   }, [game?.roundEndsAt, now]);
 
@@ -107,6 +114,22 @@ export default function Lobby({ params }: { params: { code: string } }) {
     .toString()
     .padStart(2, "0");
   const segundos = (tiempoRestante % 60).toString().padStart(2, "0");
+
+  const joinUrl = useMemo(() => {
+    // si todavía no tenemos origin, igual devolvemos path
+    const path = `/g/${code}`;
+    return origin ? `${origin}${path}` : path;
+  }, [origin, code]);
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(joinUrl);
+      alert("Link copiado ✅");
+    } catch {
+      // fallback
+      prompt("Copiá el link:", joinUrl);
+    }
+  }
 
   async function iniciarRonda() {
     if (!game) return;
@@ -130,8 +153,6 @@ export default function Lobby({ params }: { params: { code: string } }) {
       });
 
       const roundEndsAt = Date.now() + ROUND_DURATION * 1000;
-
-      // ✅ Paso 2.B: elegir palabra y guardarla en Firestore
       const word = pickRandomWord();
 
       await updateDoc(doc(db, "games", code), {
@@ -140,7 +161,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
         ronda: (game.ronda || 0) + 1,
         roundEndsAt,
         reveal: false,
-        word, // ✅ guardado
+        word,
       });
 
       setShowRole(false);
@@ -174,8 +195,6 @@ export default function Lobby({ params }: { params: { code: string } }) {
         estado: "lobby",
         roundEndsAt: null,
         reveal: false,
-        // opcional: mantener word o limpiarla
-        // word: null,
       });
     } catch (e: any) {
       alert(`Error al volver al lobby: ${e?.message || e}`);
@@ -217,25 +236,27 @@ export default function Lobby({ params }: { params: { code: string } }) {
 
   return (
     <div style={{ padding: 20, fontFamily: "Arial" }}>
+      {/* HEADER */}
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-        {/* ✅ Si tu archivo es public/TMF_Group.png */}
         <img
           src="/TMF_Group.png"
           onError={(e) => {
-            // fallback por si tenés otro nombre
             (e.currentTarget as HTMLImageElement).src = "/tmf-logo.png";
           }}
           style={{
             height: 40,
+            width: 40,
+            objectFit: "contain",
             background: "white",
             padding: 4,
-            borderRadius: 6,
+            borderRadius: 8,
+            border: "1px solid #e5e7eb",
           }}
           alt="TMF"
         />
         <div>
-          <div style={{ fontSize: 20, fontWeight: 800 }}>El Infiltrado TMF</div>
-          <div style={{ opacity: 0.8 }}>
+          <div style={{ fontSize: 20, fontWeight: 900 }}>El Infiltrado TMF</div>
+          <div style={{ opacity: 0.85 }}>
             Código: <b>{code}</b> · Estado: <b>{game.estado}</b> · Ronda:{" "}
             <b>{game.ronda || 0}</b>
           </div>
@@ -244,6 +265,78 @@ export default function Lobby({ params }: { params: { code: string } }) {
           <button onClick={pantallaCompleta} style={{ padding: 10 }}>
             Pantalla completa
           </button>
+        </div>
+      </div>
+
+      {/* ✅ QR */}
+      <div
+        style={{
+          marginTop: 14,
+          padding: 14,
+          border: "1px solid #e5e7eb",
+          borderRadius: 14,
+          background: "#fff",
+        }}
+      >
+        <div style={{ fontWeight: 900, marginBottom: 8 }}>QR para unirse</div>
+
+        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            style={{
+              padding: 10,
+              border: "1px solid #e5e7eb",
+              borderRadius: 12,
+              background: "#fff",
+            }}
+          >
+            <QRCode value={joinUrl} size={170} />
+          </div>
+
+          <div style={{ minWidth: 240 }}>
+            <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>
+              Link directo:
+            </div>
+
+            <div
+              style={{
+                fontFamily: "monospace",
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid #e5e7eb",
+                background: "#f9fafb",
+                wordBreak: "break-all",
+              }}
+            >
+              {joinUrl}
+            </div>
+
+            <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <button onClick={copyLink} style={{ padding: 10 }}>
+                Copiar link
+              </button>
+
+              <a
+                href={joinUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  padding: "10px 12px",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 10,
+                  textDecoration: "none",
+                  color: "#111827",
+                  background: "#fff",
+                  display: "inline-block",
+                }}
+              >
+                Abrir link
+              </a>
+            </div>
+
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+              Tip: si vas a proyectar, poné “Pantalla completa”.
+            </div>
+          </div>
         </div>
       </div>
 
@@ -344,8 +437,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-            * “Revelar infiltrados” fuerza modo resultados y muestra quién era el
-            infiltrado por equipo.
+            * “Revelar infiltrados” fuerza modo resultados y muestra quién era el infiltrado por equipo.
           </div>
         </div>
       )}
@@ -390,7 +482,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
                   Equipo: <b>{miJugador.equipo}</b>
                 </div>
 
-                {/* ✅ Mostrar palabra SOLO a "equipo" */}
+                {/* Mostrar palabra SOLO a equipo */}
                 {miJugador.rol === "equipo" && game.word && (
                   <div
                     style={{
@@ -404,11 +496,12 @@ export default function Lobby({ params }: { params: { code: string } }) {
                       display: "inline-block",
                     }}
                   >
-                    Palabra: <span style={{ textTransform: "uppercase" }}>{game.word}</span>
+                    Palabra:{" "}
+                    <span style={{ textTransform: "uppercase" }}>{game.word}</span>
                   </div>
                 )}
 
-                {/* ✅ Si es infiltrado, no mostrar palabra */}
+                {/* Si es infiltrado, no mostrar palabra */}
                 {miJugador.rol === "infiltrado" && (
                   <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
                     No tenés palabra. Improvisá 😈
@@ -447,7 +540,7 @@ export default function Lobby({ params }: { params: { code: string } }) {
         </div>
       )}
 
-      {/* PLAYERS (✅ ocultar roles SIEMPRE acá) */}
+      {/* PLAYERS (roles ocultos SIEMPRE) */}
       <div
         style={{
           marginTop: 18,
