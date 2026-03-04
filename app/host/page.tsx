@@ -7,8 +7,13 @@ import { useState } from "react";
 function withTimeout<T>(p: Promise<T>, ms = 15000) {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("Timeout (15s)")), ms);
-    p.then((v) => { clearTimeout(t); resolve(v); })
-     .catch((e) => { clearTimeout(t); reject(e); });
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      clearTimeout(t);
+      reject(e);
+    });
   });
 }
 
@@ -22,8 +27,12 @@ export default function HostPage() {
       setLoading(true);
       setStatus("1/4 Importando Firebase...");
 
-      const { ensureAnonAuth, db } = await withTimeout(import("../../lib/firebase"));
-      const { doc, setDoc, serverTimestamp } = await withTimeout(import("firebase/firestore"));
+      const { ensureAnonAuth, db } = await withTimeout(
+        import("../../lib/firebase")
+      );
+      const { doc, setDoc, serverTimestamp } = await withTimeout(
+        import("firebase/firestore")
+      );
 
       setStatus("2/4 Autenticando anónimo...");
       const user = await withTimeout(ensureAnonAuth());
@@ -32,10 +41,20 @@ export default function HostPage() {
       const code = nanoid(6).toUpperCase();
 
       setStatus("4/4 Guardando en Firestore...");
+
       await withTimeout(
         setDoc(doc(db, "games", code), {
+          code,
           hostUid: user.uid,
-          status: "lobby",
+          estado: "lobby",     // ✅ (antes decía status)
+          ronda: 0,
+          players: [],
+          reveal: false,
+          word: null,
+          roundEndsAt: null,
+          roundStartedAt: null,
+          votes: { A: {}, B: {}, C: {}, D: {} },           // ✅
+          scores: { A: 0, B: 0, C: 0, D: 0 },              // ✅
           createdAt: serverTimestamp(),
         })
       );
