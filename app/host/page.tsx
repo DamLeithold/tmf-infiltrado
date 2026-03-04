@@ -43,21 +43,21 @@ export default function HostPage() {
       setStatus("4/4 Guardando en Firestore...");
 
       await withTimeout(
-        setDoc(doc(db, "games", code), {
-          code,
-          hostUid: user.uid,
-          estado: "lobby",     // ✅ (antes decía status)
-          ronda: 0,
-          players: [],
-          reveal: false,
-          word: null,
-          roundEndsAt: null,
-          roundStartedAt: null,
-          votes: { A: {}, B: {}, C: {}, D: {} },           // ✅
-          scores: { A: 0, B: 0, C: 0, D: 0 },              // ✅
-          createdAt: serverTimestamp(),
-        })
-      );
+  setDoc(doc(db, "games", code), {
+    code,
+    hostUid: user.uid,
+    estado: "lobby",   // ✅ no "status"
+    ronda: 0,
+    players: [],
+    reveal: false,
+    word: null,
+    roundEndsAt: null,
+    roundStartedAt: null,
+    votes: [],
+    scores: { A: 0, B: 0, C: 0, D: 0 },
+    createdAt: serverTimestamp(),
+  })
+);
 
       setStatus("Listo ✅ Redirigiendo...");
       router.push(`/g/${code}`);
