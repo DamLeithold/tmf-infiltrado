@@ -27,12 +27,8 @@ export default function HostPage() {
       setLoading(true);
       setStatus("1/4 Importando Firebase...");
 
-      const { ensureAnonAuth, db } = await withTimeout(
-        import("../../lib/firebase")
-      );
-      const { doc, setDoc, serverTimestamp } = await withTimeout(
-        import("firebase/firestore")
-      );
+      const { ensureAnonAuth, db } = await withTimeout(import("../../lib/firebase"));
+      const { doc, setDoc, serverTimestamp } = await withTimeout(import("firebase/firestore"));
 
       setStatus("2/4 Autenticando anónimo...");
       const user = await withTimeout(ensureAnonAuth());
@@ -41,23 +37,28 @@ export default function HostPage() {
       const code = nanoid(6).toUpperCase();
 
       setStatus("4/4 Guardando en Firestore...");
-
       await withTimeout(
-  setDoc(doc(db, "games", code), {
-    code,
-    hostUid: user.uid,
-    estado: "lobby",   // ✅ no "status"
-    ronda: 0,
-    players: [],
-    reveal: false,
-    word: null,
-    roundEndsAt: null,
-    roundStartedAt: null,
-    votes: [],
-    scores: { A: 0, B: 0, C: 0, D: 0 },
-    createdAt: serverTimestamp(),
-  })
-);
+        setDoc(doc(db, "games", code), {
+          code,
+          hostUid: user.uid,
+
+          // compat: guardamos ambos
+          estado: "lobby",
+          status: "lobby",
+
+          ronda: 0,
+          players: [],
+
+          scores: { A: 0, B: 0, C: 0, D: 0 },
+          votes: { A: {}, B: {}, C: {}, D: {} },
+
+          reveal: false,
+          word: null,
+          roundEndsAt: null,
+
+          createdAt: serverTimestamp(),
+        })
+      );
 
       setStatus("Listo ✅ Redirigiendo...");
       router.push(`/g/${code}`);
